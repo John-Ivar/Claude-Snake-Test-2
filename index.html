@@ -151,7 +151,6 @@ const C = {
   tileW:72, tileH:36, wallH:46,
   gridW:30, gridH:30,
   initSpeed:185, minSpeed:78, speedStep:4,
-  lookAhead:5,
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -224,11 +223,10 @@ let food={x:0,y:0},score=0,speed=C.initSpeed,moveAcc=0;
 let highScore=+localStorage.getItem('lsnHS')||0;
 let lastTs=0;
 
-// Camera (spring-based)
-let camX=15,camY=15;          // current position
-let camTX=15,camTY=15;        // target
-let camVX=0,camVY=0;          // velocity
-let smoothDX=1,smoothDY=0;    // smoothed direction vector
+// Camera
+let camX=15,camY=15;
+let camAngle=0,camAngleV=0;   // third-person rotation
+let smoothDX=1,smoothDY=0;
 
 // Quotes
 let qPool=[],qIdx=0;
@@ -248,6 +246,8 @@ addEventListener('resize',resize); resize();
 // ISO MATH
 // ═══════════════════════════════════════════════════════════════
 const iso=(gx,gy)=>({x:(gx-gy)*(C.tileW*.5), y:(gx+gy)*(C.tileH*.5)});
+function angleDiff(a,b){let d=b-a;while(d>Math.PI)d-=2*Math.PI;while(d<-Math.PI)d+=2*Math.PI;return d;}
+function dirToAngle(d){const p=iso(d.x,d.y);return -Math.atan2(p.y,p.x)-Math.PI*.5;}
 
 // ═══════════════════════════════════════════════════════════════
 // DRAWING — GROUND TILES
@@ -302,14 +302,14 @@ function drawWall(sx,sy){
 // ═══════════════════════════════════════════════════════════════
 // DRAWING — SMOOTH SNAKE TUBE
 // ═══════════════════════════════════════════════════════════════
-function getSnakeScreenPts(snk,camP,cx2,cy2){
-  const EL=18; // elevation above ground
+function getSnakeScreenPts(snk,headIso){
+  const EL=18;
   return snk.map((s,i)=>{
     const pr=prevSnake[i]||s;
     const vx=pr.x+(s.x-pr.x)*moveT;
     const vy=pr.y+(s.y-pr.y)*moveT;
     const p=iso(vx,vy);
-    return{x:cx2+p.x-camP.x, y:cy2+p.y-camP.y-EL};
+    return{x:p.x-headIso.x, y:p.y-headIso.y-EL};
   });
 }
 
@@ -334,28 +334,17 @@ function drawSnakeTube(pts){
   const BW=24;
   cx.save();
   cx.lineCap='round';cx.lineJoin='round';
-  // Drop shadow
-  cx.strokeStyle='rgba(0,0,0,.38)';cx.lineWidth=BW+12;
-  buildPath(pts,3,8);cx.stroke();
-  // Dark outline
-  cx.strokeStyle='#0a2812';cx.lineWidth=BW+5;
-  buildPath(pts,0,0);cx.stroke();
   // Body gradient: vivid green head → deep forest tail
   const g=cx.createLinearGradient(pts[0].x,pts[0].y,pts[pts.length-1].x,pts[pts.length-1].y);
   g.addColorStop(0,'#80e89a');g.addColorStop(.3,'#5cbe72');
   g.addColorStop(.7,'#38944e');g.addColorStop(1,'#1a5c2c');
   cx.strokeStyle=g;cx.lineWidth=BW;
   buildPath(pts,0,0);cx.stroke();
-  // Scale pattern (subtle dashes along body)
-  cx.strokeStyle='rgba(0,35,12,.14)';cx.lineWidth=BW*.5;
-  cx.setLineDash([3,5]);
-  buildPath(pts,0,0);cx.stroke();
-  cx.setLineDash([]);
-  // Belly highlight (bottom, warm)
-  cx.strokeStyle='rgba(200,255,210,.12)';cx.lineWidth=BW*.3;
+  // Belly highlight
+  cx.strokeStyle='rgba(200,255,210,.14)';cx.lineWidth=BW*.3;
   buildPath(pts,2,4);cx.stroke();
-  // Dorsal highlight (top-left, crisp)
-  cx.strokeStyle='rgba(255,255,255,.24)';cx.lineWidth=BW*.26;
+  // Dorsal highlight
+  cx.strokeStyle='rgba(255,255,255,.26)';cx.lineWidth=BW*.26;
   buildPath(pts,-4,-5);cx.stroke();
   cx.restore();
 }
@@ -364,12 +353,6 @@ function drawHead(pt,d,now){
   const r=18;
   const hx=pt.x+d.x*6,hy=pt.y+d.y*4;
   cx.save();
-  // Shadow
-  cx.fillStyle='rgba(0,0,0,.32)';
-  cx.beginPath();cx.ellipse(hx+2,hy+6,r+5,r+2,0,0,Math.PI*2);cx.fill();
-  // Outline
-  cx.fillStyle='#0a2812';
-  cx.beginPath();cx.arc(hx,hy,r+2.5,0,Math.PI*2);cx.fill();
   // Head radial gradient
   const g=cx.createRadialGradient(hx-r*.25,hy-r*.25,0,hx,hy,r);
   g.addColorStop(0,'#b8f8c4');g.addColorStop(.45,'#6ed682');g.addColorStop(1,'#3aaa54');
@@ -455,49 +438,66 @@ function drawFood(sx,sy,now){
 // ═══════════════════════════════════════════════════════════════
 // RENDER SCENE (full board, all passes)
 // ═══════════════════════════════════════════════════════════════
-function renderScene(snk,fd,cam,snkDir,isMenu){
+function renderScene(snk,fd,snkDir,isMenu){
   const gW=C.gridW,gH=C.gridH;
-  const camP=iso(cam.x,cam.y);
-  const cx2=cv.width*.5,cy2=cv.height*.5;
   const now=performance.now();
+  const cx2=cv.width*.5,cy2=cv.height*.5;
 
-  // Collect ALL tiles, sort back-to-front (painter's algorithm)
-  const tiles=[];
-  for(let gy=0;gy<gH;gy++) for(let gx=0;gx<gW;gx++) tiles.push(gx,gy);
-  // Already in order if we iterate gy then gx? No — need gx+gy order.
-  // Build sortable list
+  // Interpolated head iso position (scene origin)
+  const p0=isMenu?snk[0]:(prevSnake[0]||snk[0]);
+  const s0=snk[0];
+  const ihx=isMenu?s0.x:p0.x+(s0.x-p0.x)*moveT;
+  const ihy=isMenu?s0.y:p0.y+(s0.y-p0.y)*moveT;
+  const headIso=iso(ihx,ihy);
+
+  // In play mode: rotate scene so snake always moves toward top of screen.
+  // Head appears at a fixed offset below canvas center.
+  const angle=isMenu?0:camAngle;
+  const vOff=isMenu?0:Math.min(130,cv.height*.22);
+
+  cx.save();
+  cx.translate(cx2,cy2+vOff);
+  cx.rotate(angle);
+
+  // Pass 1: tiles back-to-front (depth sort accounts for camera rotation)
+  // Project each tile's iso screen coord onto the camera's "into screen" axis
+  const cosA=Math.cos(angle), sinA=Math.sin(angle);
   const order=[];
-  for(let gy=0;gy<gH;gy++) for(let gx=0;gx<gW;gx++) order.push({gx,gy,d:gx+gy});
+  for(let gy=0;gy<gH;gy++) for(let gx=0;gx<gW;gx++){
+    const p=iso(gx,gy);
+    const rx=p.x-headIso.x, ry=p.y-headIso.y;
+    // Depth = distance along rotated "depth" axis (screen-space Y after transform)
+    const depth=rx*sinA+ry*cosA;
+    order.push({gx,gy,d:depth});
+  }
   order.sort((a,b)=>a.d-b.d);
-
-  // Pass 1: all tiles (ground + walls)
   order.forEach(({gx,gy})=>{
     const p=iso(gx,gy);
-    const sx=cx2+p.x-camP.x, sy=cy2+p.y-camP.y;
+    const sx=p.x-headIso.x, sy=p.y-headIso.y;
     const isW=gx===0||gy===0||gx===gW-1||gy===gH-1;
-    if(isW) drawWall(sx,sy);
-    else drawGround(sx,sy,(gx+gy)&1);
+    if(isW) drawWall(sx,sy); else drawGround(sx,sy,(gx+gy)&1);
   });
 
   // Pass 2: food
   {
     const fp=iso(fd.x,fd.y);
-    const fsx=cx2+fp.x-camP.x,fsy=cy2+fp.y-camP.y;
     const bounce=Math.sin(now*.0035)*7;
-    drawFood(fsx,fsy-bounce,now);
+    drawFood(fp.x-headIso.x,fp.y-headIso.y-bounce,now);
   }
 
-  // Pass 3: snake (smooth tube + head)
-  const pts=isMenu ? getMenuSnakePts(snk,camP,cx2,cy2) : getSnakeScreenPts(snk,camP,cx2,cy2);
+  // Pass 3: snake
+  const pts=isMenu?getMenuSnakePts(snk,headIso):getSnakeScreenPts(snk,headIso);
   if(pts.length>1) drawSnakeTube(pts);
   if(pts.length>=1) drawHead(pts[0],snkDir,now);
+
+  cx.restore();
 }
 
-function getMenuSnakePts(snk,camP,cx2,cy2){
+function getMenuSnakePts(snk,headIso){
   const EL=18;
   return snk.map(s=>{
     const p=iso(s.x,s.y);
-    return{x:cx2+p.x-camP.x, y:cy2+p.y-camP.y-EL};
+    return{x:p.x-headIso.x, y:p.y-headIso.y-EL};
   });
 }
 
@@ -583,8 +583,7 @@ function renderMenu(dt){
   for(let x=0;x<cv.width;x+=42)for(let y=0;y<cv.height;y+=42){
     cx.beginPath();cx.arc(x,y,1.1,0,Math.PI*2);cx.fill();}
   tickMenu(dt);
-  const mc={x:mSnk[0]?.x||15,y:mSnk[0]?.y||15};
-  renderScene(mSnk,mFd,mc,mDir,true);
+  renderScene(mSnk,mFd,mDir,true);
   drawVignette();
 }
 
@@ -593,13 +592,14 @@ function renderMenu(dt){
 // ═══════════════════════════════════════════════════════════════
 const shuffle=a=>{for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a;};
 const nextQ=()=>{if(qIdx>=qPool.length){qPool=shuffle([...QUOTES]);qIdx=0;}return qPool[qIdx++];};
-function spawnPopup(gx,gy){
+function spawnPopup(){
   const txt=nextQ();
-  const cp=iso(camX,camY),p=iso(gx,gy);
-  const sx=cv.width*.5+p.x-cp.x,sy=cv.height*.5+p.y-cp.y-35;
+  // Head is always near (cx2, cy2+vOff) in screen space
+  const sx=cv.width*.5;
+  const sy=cv.height*.5+Math.min(130,cv.height*.22)-55;
   const el=document.createElement('div');el.className='popup';el.textContent=txt;
   const mw=Math.min(250,innerWidth*.64);
-  el.style.cssText=`left:${Math.max(10,Math.min(sx-mw*.5,innerWidth-mw-10))}px;top:${Math.max(50,Math.min(sy-18,innerHeight-105))}px;max-width:${mw}px`;
+  el.style.cssText=`left:${Math.max(10,Math.min(sx-mw*.5,innerWidth-mw-10))}px;top:${Math.max(50,Math.min(sy,innerHeight-105))}px;max-width:${mw}px`;
   document.getElementById('popupLayer').appendChild(el);
   setTimeout(()=>el.remove(),3300);
 }
@@ -627,9 +627,9 @@ function moveSnake(){
     document.getElementById('scoreVal').textContent=score;
     document.getElementById('levelVal').textContent='Nivå '+(Math.floor(score/5)+1);
     speed=Math.max(C.minSpeed,C.initSpeed-score*C.speedStep);
-    const cp=iso(camX,camY),fp=iso(food.x,food.y);
-    spawnPopup(food.x,food.y);
-    emitParticles(cv.width*.5+fp.x-cp.x,cv.height*.5+fp.y-cp.y-35);
+    spawnPopup();
+    const _vOff=Math.min(130,cv.height*.22);
+    emitParticles(cv.width*.5,cv.height*.5+_vOff-18);
     Sfx.eat();placeFood();
   } else snake.pop();
 }
@@ -701,7 +701,7 @@ function startGame(){
   dir={x:1,y:0};nextDir={x:1,y:0};moveT=1;
   score=0;speed=C.initSpeed;moveAcc=0;
   smoothDX=1;smoothDY=0;
-  camX=mx+C.lookAhead;camY=my;camTX=camX;camTY=camY;camVX=0;camVY=0;
+  camAngle=dirToAngle({x:1,y:0});camAngleV=0;
   qPool=shuffle([...QUOTES]);qIdx=0;
   document.getElementById('scoreVal').textContent='0';
   document.getElementById('levelVal').textContent='Nivå 1';
@@ -737,32 +737,25 @@ function loop(ts){
     if(moveAcc>=speed){moveAcc-=speed;moveSnake();}
     moveT=Math.min(1,moveAcc/speed);
 
-    // ── Smooth direction for look-ahead ──
+    // ── Smooth direction ──
     smoothDX+=(dir.x-smoothDX)*.04;
     smoothDY+=(dir.y-smoothDY)*.04;
 
-    // ── Camera target: ahead of interpolated head ──
-    const p0=prevSnake[0]||snake[0], s0=snake[0];
-    const ihx=p0.x+(s0.x-p0.x)*moveT;
-    const ihy=p0.y+(s0.y-p0.y)*moveT;
-    camTX=ihx+smoothDX*C.lookAhead;
-    camTY=ihy+smoothDY*C.lookAhead;
-
-    // ── Spring camera ──
-    const kSpring=.09, kDamp=.82;
-    camVX+=(camTX-camX)*kSpring; camVY+=(camTY-camY)*kSpring;
-    camVX*=kDamp; camVY*=kDamp;
-    camX+=camVX; camY+=camVY;
+    // ── Third-person camera: rotate scene so snake faces "up" ──
+    const tgtAngle=dirToAngle(dir);
+    const adiff=angleDiff(camAngle,tgtAngle);
+    camAngleV+=adiff*.028; camAngleV*=.78;
+    camAngle+=camAngleV;
 
     // ── Render ──
     renderBG();
-    renderScene(snake,food,{x:camX,y:camY},dir,false);
+    renderScene(snake,food,dir,false);
     tickParticles(dt); drawParticles();
     drawVignette();
 
   } else if(state===ST.PAUSE){
     renderBG();
-    renderScene(snake,food,{x:camX,y:camY},dir,false);
+    renderScene(snake,food,dir,false);
     drawVignette();
 
   } else { // MENU or OVER
