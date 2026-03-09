@@ -661,7 +661,7 @@ document.addEventListener('keydown',e=>{
   }
 });
 
-// Touch: isometric-aware swipe mapping
+// Touch: camera-aware swipe mapping
 let tx0=0,ty0=0;
 document.addEventListener('touchstart',e=>{
   e.preventDefault();tx0=e.touches[0].clientX;ty0=e.touches[0].clientY;
@@ -670,12 +670,13 @@ document.addEventListener('touchend',e=>{
   e.preventDefault();
   const dx=e.changedTouches[0].clientX-tx0;
   const dy=e.changedTouches[0].clientY-ty0;
-  if(Math.max(Math.abs(dx),Math.abs(dy))<22) return;
-  // Map screen swipe → isometric grid direction
-  // iso: screenX = (gx-gy)*tileW/2,  screenY = (gx+gy)*tileH/2
-  // inverse (proportional): gridX ∝ dx/tileW + dy/tileH,  gridY ∝ -dx/tileW + dy/tileH
-  const gx = dx/C.tileW + dy/C.tileH;
-  const gy = -dx/C.tileW + dy/C.tileH;
+  if(Math.hypot(dx,dy)<28) return;
+  // Un-rotate swipe vector by current camera angle, then apply iso inverse.
+  // This ensures "swipe up" always means "forward" regardless of which way the board is rotated.
+  const ca=Math.cos(-camAngle), sa=Math.sin(-camAngle);
+  const rdx=dx*ca-dy*sa, rdy=dx*sa+dy*ca;
+  const gx=rdx/C.tileW+rdy/C.tileH;
+  const gy=-rdx/C.tileW+rdy/C.tileH;
   if(Math.abs(gx)>Math.abs(gy)) setDir(gx>0?{x:1,y:0}:{x:-1,y:0});
   else setDir(gy>0?{x:0,y:1}:{x:0,y:-1});
   if(state===ST.PAUSE) resumeGame();
